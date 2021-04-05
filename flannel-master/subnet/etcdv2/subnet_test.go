@@ -62,6 +62,16 @@ func TestAcquireLease(t *testing.T) {
 		t.Fatal("AcquireLease failed: ", err)
 	}
 
+	extIaddr2, _ := ip.ParseIP4("1.2.3.5")
+	attrs2 := LeaseAttrs{
+		PublicIP: extIaddr2,
+	}
+
+	_, err = sm.AcquireLease(context.Background(), &attrs2)
+	if err != nil {
+		t.Fatal("AcquireLease failed: ", err)
+	}
+
 	if !inAllocatableRange(context.Background(), sm, l.Subnet) {
 		t.Fatal("Subnet mismatch: expected 10.3.3.0/24, got: ", l.Subnet)
 	}

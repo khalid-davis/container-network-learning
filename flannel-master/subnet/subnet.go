@@ -34,14 +34,20 @@ var (
 )
 
 type LeaseAttrs struct {
+	// 与外部主机交互的网卡IP，如果不配置会取默认路由的网卡IP地址
 	PublicIP    ip.IP4
+	// backend类型，host-gw, udp, vxlan等
 	BackendType string          `json:",omitempty"`
+	// 配置信息，不同后端配置不同
 	BackendData json.RawMessage `json:",omitempty"`
 }
 
 type Lease struct {
+	// 子网信息
 	Subnet     ip.IP4Net
+	// flanneld进程所在机器信息
 	Attrs      LeaseAttrs
+	// 租赁到期时间
 	Expiration time.Time
 
 	Asof uint64
@@ -117,11 +123,18 @@ func ParseSubnetKey(s string) *ip.IP4Net {
 func MakeSubnetKey(sn ip.IP4Net) string {
 	return sn.StringSep(".", "-")
 }
-
+// https://zhuanlan.zhihu.com/p/277486806
 type Manager interface {
+	// 获取存储在etcd的网络配置
+	// 初始化时需要获取网络配置，包括子网信息，backendType等
 	GetNetworkConfig(ctx context.Context) (*Config, error)
+	// 子网租赁，类似dhcp
 	AcquireLease(ctx context.Context, attrs *LeaseAttrs) (*Lease, error)
+	// 子网续租，类似dhcp
+	// 定期更新子网过期时间，保证subnet在运行期间不过期
 	RenewLease(ctx context.Context, lease *Lease) error
+	// 子网变化监控，
+	// 主要是backend监控到子网变化时操作路由
 	WatchLease(ctx context.Context, sn ip.IP4Net, cursor interface{}) (LeaseWatchResult, error)
 	WatchLeases(ctx context.Context, cursor interface{}) (LeaseWatchResult, error)
 

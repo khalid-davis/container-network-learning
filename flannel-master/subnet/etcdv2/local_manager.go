@@ -84,6 +84,7 @@ func newLocalManager(r Registry, prevSubnet ip.IP4Net) Manager {
 	}
 }
 
+// 从etcd中获取$prefix/config key的值
 func (m *LocalManager) GetNetworkConfig(ctx context.Context) (*Config, error) {
 	cfg, err := m.registry.getNetworkConfig(ctx)
 	if err != nil {
@@ -93,6 +94,20 @@ func (m *LocalManager) GetNetworkConfig(ctx context.Context) (*Config, error) {
 	return ParseConfig(cfg)
 }
 
+// 子网租赁，从etcd当中申请租赁一段子网供本机使用。子网租赁过程比较复杂：
+// 1. 获取当前所有子网信息
+// 2. 判断是否有本机ip的注册信息(publicIP对应的子网记录)，在flanneld会有renew过程，所以etcd可能会保留有记录
+// 3. 如果有本机注册信息，校验地址段是否在config的子网范围内，在的话就复用这个地址段
+// 4. 如果以上条件都不满足，那么会先尝试复用本地保存的之前的子网信息
+// 5. 如果本地保存的子网信息依然无效，那么会尝试申请一个子网
+// 否则会尝试申请一个子网(allocateSubnet)
+// 申请子网也比较暴力，从网络当中最小的ip开始探测，找100个未被使用的子网，然后随机挑选一个（具体是获取全部已经分配的子网信息，leases
+// 对象，然后通过overlap判断是否有网段重叠，如果有的话，就直接跳过）
+// 随机挑选的目的应该是防止冲突，比如两个机器都在申请，如果都取第一个，那么就会有一个创建etcd节点失败
+// 最终会将子网写入etcd的prefix/subnets/prefix/subnets/ip 这个key当中，
+// 其中会将ip的点分十进制的.替换为-
+
+// flannel的子网租赁非常的巧妙，跟dhcp申请ip的过程很类似，尽可能的保证使用自己之前的信息，因为不能因为flanneld重启，导致整个子网都改变了，所有容器都再初始化一次。
 func (m *LocalManager) AcquireLease(ctx context.Context, attrs *LeaseAttrs) (*Lease, error) {
 	config, err := m.GetNetworkConfig(ctx)
 	if err != nil {
@@ -135,11 +150,13 @@ func findLeaseBySubnet(leases []Lease, subnet ip.IP4Net) *Lease {
 }
 
 func (m *LocalManager) tryAcquireLease(ctx context.Context, config *Config, extIaddr ip.IP4, attrs *LeaseAttrs) (*Lease, error) {
+	// 从仓库里面获取全部的网段分配信息，可以看看subnet_test.go里面的mock对象的初始化方式
 	leases, _, err := m.registry.getSubnets(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	// 根据主机的publicIP信息来获取是否已经有分配过的，有的话，直接返回就可以了（重启或者续期使用）
 	// Try to reuse a subnet if there's one that matches our IP
 	if l := findLeaseByIP(leases, extIaddr); l != nil {
 		// Make sure the existing subnet is still within the configured network
@@ -230,6 +247,7 @@ func (m *LocalManager) tryAcquireLease(ctx context.Context, config *Config, extI
 	}
 }
 
+// 这里到底是怎么挑选出这100个符合条件的，理论上已经分配过的就不能再分配了，是怎么判断出这个的
 func (m *LocalManager) allocateSubnet(config *Config, leases []Lease) (ip.IP4Net, error) {
 	log.Infof("Picking subnet in range %s ... %s", config.SubnetMin, config.SubnetMax)
 
@@ -322,6 +340,13 @@ func (m *LocalManager) WatchLease(ctx context.Context, sn ip.IP4Net, cursor inte
 	}
 }
 
+// 在网络初始化完成，子网申请成功之后，backend会定时查看整个subnets的状态（具体是在backend的代码里面有一个sm.WatchLeases）
+// 当有subnet申请成功时，会watch到etcd的事件，当有subnet过期被删除时，flanneld同样会收到通知。
+// backend主要是调用subnet/watch.go当中的WatchLeases，最终调用到localManager里面的WatchLeases。
+
+// WatchLease本质上最终是监听$prefix/subnets这个key的变化
+// subnet.WatchLeases -> localManager.WatchLease -> registry.watchSubnets
+// 最终registry.watchSubnets会阻塞等待事件通知，最终反馈给backend，backend再根据EventAdded或者EventRemoved事件去处理，
 func (m *LocalManager) WatchLeases(ctx context.Context, cursor interface{}) (LeaseWatchResult, error) {
 	if cursor == nil {
 		return m.leasesWatchReset(ctx)
